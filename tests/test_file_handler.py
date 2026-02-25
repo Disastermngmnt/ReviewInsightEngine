@@ -22,7 +22,7 @@ class TestFileHandler:
         result = handler.process_file(b"test", "test.txt")
         
         assert "error" in result
-        assert "Unsupported file format" in result["error"]
+        assert "not allowed" in result["error"].lower()
     
     def test_empty_file(self):
         handler = FileHandler()
@@ -34,7 +34,7 @@ class TestFileHandler:
     
     def test_low_review_warning(self):
         handler = FileHandler()
-        csv_data = b"review_text\n\"Test review 1\"\n\"Test review 2\"\n"
+        csv_data = b"review_text,rating\n\"Test review 1\",5\n\"Test review 2\",4\n"
         result = handler.process_file(csv_data, "small.csv")
         
         assert "warning" in result

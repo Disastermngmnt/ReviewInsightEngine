@@ -79,7 +79,7 @@ def main():
     checks = [
         check_file_exists("utils/rate_limiter.py", "Rate limiter"),
         check_file_exists("utils/validators.py", "Input validators"),
-        check_file_exists("SECURITY.md", "Security documentation"),
+        check_file_exists("docs/SECURITY.md", "Security documentation"),
         check_import("utils.rate_limiter", "Rate limiter module"),
         check_import("utils.validators", "Validators module"),
     ]
@@ -101,10 +101,10 @@ def main():
     print("\n5. DOCUMENTATION")
     print("-" * 70)
     checks = [
-        check_file_exists("README_IMPROVEMENTS.md", "Improvements README"),
-        check_file_exists("QUICKSTART.md", "Quick start guide"),
-        check_file_exists("SECURITY.md", "Security guidelines"),
-        check_file_exists("IMPROVEMENTS_SUMMARY.md", "Summary document"),
+        check_file_exists("docs/README_IMPROVEMENTS.md", "Improvements README"),
+        check_file_exists("docs/QUICKSTART.md", "Quick start guide"),
+        check_file_exists("docs/SECURITY.md", "Security guidelines"),
+        check_file_exists("docs/IMPROVEMENTS_SUMMARY.md", "Summary document"),
     ]
     checks_passed += sum(checks)
     checks_total += len(checks)

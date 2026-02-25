@@ -45,7 +45,7 @@ class TestSentimentAlignment:
             }
         }
         narratives = {
-            "executive_summary": "The product faces critical issues with poor performance and negative feedback."
+            "executive_summary": "The product faces critical issues with poor performance and negative feedback, despite some strong areas."
         }
         
         result = check_sentiment_alignment(report, narratives)
@@ -77,7 +77,7 @@ class TestTopThemeConsistency:
             }
         }
         narratives = {
-            "executive_summary": "Users report performance issues and confusing UI design.",
+            "executive_summary": "Users report performance issues and confusing ux/ui design.",
             "hypothesis": "The pricing model may need adjustment."
         }
         

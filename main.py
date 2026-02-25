@@ -2,20 +2,29 @@
 # Integrates with: core/ modules for logic, utils/ for helpers, and config/ for settings.
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Depends, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 import uvicorn
 import math
 import json
 import os
+import asyncio
 
 from core.auth import AuthManager
 from core.file_handler import FileHandler
+from core.play_store_api import PlayStoreConnector
+from core.app_store_api import AppStoreConnector
 from core.analyzer import Analyzer
-from core.ai_engine import AIEngine
+from core.ai_engine import AIEngine, generate_run_id
 from core.synthesis_engine import SynthesisEngine
+from core.signal_extractor import extract_signals, aggregate_theme_signals
+from core.prioritization_engine import compute_priority_scores, classify_quadrant
+from core.financial_engine import compute_financial_impact, FinancialInputs
+from core.dispatch_formatter import assemble_dispatch_report
+from core.pipeline_runner import DispatchPipeline
 from core.database import Base, engine, SessionLocal, get_db
 from core.models import UsageStats
+from core.taxonomy_gate import check_coverage, build_taxonomy_from_proposal, format_gate_result_for_frontend
 from utils.logger import setup_logger
 from utils.exceptions import (
     ReviewInsightError,
@@ -88,6 +97,16 @@ async def read_root():
     except FileNotFoundError:
         logger.error("index.html not found")
         raise HTTPException(status_code=404, detail="Page not found")
+
+@app.get("/marketing", response_class=HTMLResponse)
+async def read_marketing():
+    """Serve the marketing landing page."""
+    try:
+        with open("static/landing.html", "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        logger.error("landing.html not found")
+        raise HTTPException(status_code=404, detail="Marketing page not found")
 
 
 # ── AUTHENTICATION ENDPOINT ──────────────────────────────────────────────────
@@ -184,6 +203,86 @@ async def upload_file(request: Request, file: UploadFile = File(...)):
         logger.error(f"Unexpected error in upload: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+# ── GOOGLE PLAY API ENDPOINT ─────────────────────────────────────────────────
+# Fetches data via the official Google Play Developer API.
+# Integrates with: core/play_store_api.py
+@app.post("/api/fetch_play_store")
+async def fetch_play_store(
+    request: Request,
+    package_name: str = Form(...),
+    service_account_json: UploadFile = File(...)
+):
+    client_id = get_client_id(request)
+    
+    try:
+        rate_limiter.check_rate_limit(f"fetch_play:{client_id}")
+    except RateLimitError as e:
+        raise HTTPException(
+            status_code=429,
+            detail=e.message,
+            headers={"Retry-After": str(e.details.get("retry_after", 60))}
+        )
+    
+    logger.info(f"Play Store fetch from {client_id} for {package_name}")
+    
+    try:
+        # Extract json key
+        json_contents = await service_account_json.read()
+        
+        connector = PlayStoreConnector(
+            package_name=package_name,
+            service_account_json_content=json_contents
+        )
+        
+        # Max results 500 mapping to the same scale as MVP CSV uploads
+        result = connector.fetch_reviews(max_results=500)
+        
+        if "error" in result:
+            logger.warning(f"Play Store API error: {result['error']}")
+            raise HTTPException(status_code=400, detail=result["error"])
+            
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error in play store fetch: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ── APPLE APP STORE API ENDPOINT ─────────────────────────────────────────────
+# Fetches data via the public iTunes RSS Customer Reviews feed.
+# Integrates with: core/app_store_api.py
+@app.post("/api/fetch_app_store")
+async def fetch_app_store(
+    request: Request,
+    app_id: str = Form(...)
+):
+    client_id = get_client_id(request)
+    
+    try:
+        rate_limiter.check_rate_limit(f"fetch_appstore:{client_id}")
+    except RateLimitError as e:
+        raise HTTPException(
+            status_code=429,
+            detail=e.message,
+            headers={"Retry-After": str(e.details.get("retry_after", 60))}
+        )
+    
+    logger.info(f"App Store fetch from {client_id} for {app_id}")
+    
+    try:
+        # Max results 500 mapping to the same scale as MVP CSV uploads
+        result = AppStoreConnector.fetch_reviews(app_id=app_id, max_pages=10)
+        return result
+        
+    except ValueError as e:
+        logger.warning(f"App Store API error: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error in app store fetch: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 
 # ── PRICING & USAGE ENDPOINT ─────────────────────────────────────────────────
 # Returns global usage statistics and the current calculated price.
@@ -212,6 +311,58 @@ async def get_pricing(db: Session = Depends(get_db)):
     return {"usages": current_usage, "price": current_price}
 
 
+# ── TAXONOMY GATE ENDPOINT ───────────────────────────────────────────────────
+@app.post("/api/taxonomy_check")
+async def check_taxonomy(
+    request: Request,
+    columns: str = Form(...),
+    data: str = Form(...)
+):
+    """
+    Evaluates whether the default taxonomy is appropriate for the uploaded reviews.
+    Returns PASS or FAIL (with AI-proposed custom taxonomy).
+    """
+    client_id = get_client_id(request)
+    try:
+        rate_limiter.check_rate_limit(f"taxonomy_check:{client_id}")
+    except RateLimitError as e:
+        raise HTTPException(status_code=429, detail=e.message)
+
+    try:
+        columns_list = json.loads(columns)
+        data_list = json.loads(data)
+
+        # Basic parser just to get the review text out
+        review_col = None
+        for col in columns_list:
+            if col.lower() in ["review", "content", "text", "body", "comment", "feedback"]:
+                review_col = col
+                break
+        if not review_col and columns_list:
+            review_col = columns_list[0]
+            
+        review_idx = columns_list.index(review_col) if review_col in columns_list else 0
+        review_texts = [str(r[review_idx]) for r in data_list if len(r) > review_idx and str(r[review_idx]).strip()]
+
+        # 1. Run the coverage check against default taxonomy
+        gate_result = check_coverage(review_texts)
+
+        # 2. If it fails, generate a custom taxonomy
+        proposal = None
+        if not gate_result["passes"]:
+            ai = AIEngine()
+            proposal = ai.propose_custom_taxonomy(gate_result["sample_texts"])
+
+        # 3. Format and return
+        return format_gate_result_for_frontend(gate_result, proposal)
+
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON data")
+    except Exception as e:
+        logger.error(f"Taxonomy check failed: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── CORE ANALYSIS ENDPOINT ───────────────────────────────────────────────────
 # Executes the full Review Insight Engine pipeline.
 # Pipeline: Usage Track -> Deterministic Analysis -> AI Narrative -> Synthesis Validation.
@@ -220,21 +371,35 @@ async def analyze_reviews(
     request: Request,
     columns: str = Form(...),
     data: str = Form(...),
+    total_users: str = Form(None),
+    monthly_arpu: str = Form(None),
+    segment_weights: str = Form(None),
+    sprint_cost: str = Form(None),
+    priority_weights: str = Form(None),
+    effort_scoring_method: str = Form("B"),        # Dispatch v3.0: A / B / C
+    filename: str = Form("unknown_file"),           # Dispatch Run Identity Header
+    custom_taxonomy: str = Form(None),              # From taxonomy gate
     db: Session = Depends(get_db)
 ):
     """
     Analyze reviews and generate insights.
     
-    Accepts the full structured data from the frontend (columns + data rows as JSON).
-    Runs deterministic analyzer first, then AI for narrative prose only.
+    Accepts the full structured data from the frontend (columns + data rows as JSON),
+    plus optional business inputs for financial impact modelling.
     
     Args:
         columns: JSON string of column names
         data: JSON string of data rows
+        total_users: Optional total active users (for financial model)
+        monthly_arpu: Optional monthly ARPU in dollars (for financial model)
+        segment_weights: Optional JSON string of segment weights
+        sprint_cost: Optional avg engineering sprint cost in dollars
+        priority_weights: Optional JSON string of custom priority axis weights
         db: Database session
         
     Returns:
-        Complete analysis report with narratives and validation
+        Complete analysis report with narratives, validation, priority matrix,
+        and financial impact
         
     Raises:
         HTTPException: If analysis fails
@@ -267,18 +432,52 @@ async def analyze_reviews(
         columns_list = json.loads(columns)
         data_list = json.loads(data)
         
+        # Parse optional business inputs for the financial model.
+        fin_inputs = FinancialInputs(
+            total_users=int(total_users) if total_users else None,
+            monthly_arpu=float(monthly_arpu) if monthly_arpu else None,
+            segment_weights=json.loads(segment_weights) if segment_weights else None,
+            sprint_cost=float(sprint_cost) if sprint_cost else None,
+        )
+        custom_weights = json.loads(priority_weights) if priority_weights else None
+        
         logger.info(f"Analyzing {len(data_list)} reviews with {len(columns_list)} columns")
+        logger.info(f"Financial inputs calibrated: {fin_inputs.is_calibrated}")
+
+        # Generate Dispatch Run ID from data content (traceable per run)
+        data_bytes = data.encode("utf-8")
+        run_id = generate_run_id(data_bytes)
+
+        # Parse custom taxonomy if the frontend confirmed a proposed one
+        parsed_custom_taxonomy = None
+        if custom_taxonomy:
+            raw_proposal = json.loads(custom_taxonomy)
+            parsed_custom_taxonomy = build_taxonomy_from_proposal(raw_proposal)
 
         # 3. Pipeline Step A: Deterministic Analysis.
         # Integrates with: core/analyzer.py for scoring, themes, and stats.
         analyzer = Analyzer()
-        result = analyzer.run(columns_list, data_list)
+        result = analyzer.run(columns_list, data_list, custom_taxonomy=parsed_custom_taxonomy)
 
         if "error" in result:
             logger.error(f"Analyzer error: {result['error']}")
             raise HTTPException(status_code=400, detail=result["error"])
 
-        # 4. Pipeline Step B: Generative Narrative.
+        # 4. Pipeline Step B: Signal Extraction.
+        # Enriches each parsed review with polarity, urgency, churn, expansion signals.
+        parsed_reviews = result.get("_parsed_reviews", [])
+        rating_scale = result["meta"].get("rating_scale", 5) or 5
+        enriched_reviews = extract_signals(
+            parsed_reviews,
+            segment_weights=fin_inputs.segment_weights,
+            rating_scale=rating_scale,
+        )
+        total_reviews = result["meta"]["total_reviews"]
+        theme_signals = aggregate_theme_signals(enriched_reviews, total_reviews)
+        
+        logger.info(f"Signal extraction complete: {len(theme_signals)} themes")
+
+        # 5. Pipeline Step C: Generative Narrative (existing — unchanged).
         # Integrates with: core/ai_engine.py to request PM-style prose from Gemini.
         try:
             ai = AIEngine()
@@ -290,21 +489,97 @@ async def analyze_reviews(
                 detail=f"AI narrative generation failed: {str(e)}"
             )
 
-        # 5. Pipeline Step C: Cross-Validation (Synthesis).
-        # Integrates with: core/synthesis_engine.py to ensure the AI isn't hallucinating.
+        # 6. Pipeline Step D: AI Theme Scoring (Dispatch v3.0 — 5-axis decision engine).
+        # ENFORCEMENT: Never score items that belong in the Watch List (low volume).
+        valid_roadmap_cats = {item["category"] for item in result.get("roadmap_items", [])}
+        filtered_theme_signals = {
+            k: v for k, v in theme_signals.items() if k in valid_roadmap_cats
+        }
+
+        velocity_available = result["meta"].get("has_date_col", False)
+        try:
+            ai_scores = ai.score_themes(filtered_theme_signals, total_reviews, velocity_available=velocity_available)
+        except Exception as e:
+            logger.error(f"AI theme scoring failed: {str(e)}", exc_info=True)
+            # Non-fatal: degrade gracefully, priority matrix will be empty.
+            ai_scores = {"theme_scores": []}
+
+        # 7. Pipeline Step E: Priority Scoring (Dispatch v3.0 formula).
+        priority_matrix = compute_priority_scores(
+            ai_scores.get("theme_scores", []),
+            weights=custom_weights,
+            effort_method=effort_scoring_method,
+            velocity_available=velocity_available,
+        )
+        
+        logger.info(f"Priority matrix: {len(priority_matrix)} themes ranked")
+
+        # 8. Pipeline Step F: Financial Impact Modelling (Dispatch v3.0 formulas).
+        financial_impact = compute_financial_impact(
+            theme_signals, fin_inputs, total_reviews, priority_scores=priority_matrix
+        )
+
+        # 9. Pipeline Step G: Quadrant Classification.
+        # Build a financial lookup for quadrant classification.
+        fin_lookup = {}
+        for fi in financial_impact:
+            total_fin = 0
+            if fi.get("revenue_at_risk") is not None:
+                total_fin = (fi.get("revenue_at_risk", 0) or 0) + (fi.get("revenue_opportunity", 0) or 0)
+            else:
+                total_fin = None
+            fin_lookup[fi["theme"]] = total_fin
+
+        decision_quadrant = []
+        for item in priority_matrix:
+            theme = item["theme"]
+            fin_val = fin_lookup.get(theme)
+            quadrant = classify_quadrant(item["priority_score"], fin_val)
+            decision_quadrant.append({
+                "theme": theme,
+                "priority_score": item["priority_score"],
+                "financial_impact": fin_val,
+                "quadrant": quadrant,
+            })
+
+        # 10. Pipeline Step H: Cross-Validation (Synthesis — existing, unchanged).
         synthesis = SynthesisEngine()
         validation = synthesis.validate(result, narratives)
         
         logger.info(f"Validation score: {validation['validation_score']}, grade: {validation['grade']}")
 
-        # 6. Assembly: Merge all results into a single payload and prune the internal '_for_ai' breadcrumbs.
+        # 11. Pipeline Step I: Dispatch v3.0 Report Assembly.
+        financial_inputs_echo = {
+            "total_users": int(total_users) if total_users else None,
+            "monthly_arpu": float(monthly_arpu) if monthly_arpu else None,
+            "segment_weights": json.loads(segment_weights) if segment_weights else None,
+            "sprint_cost": float(sprint_cost) if sprint_cost else None,
+        }
+        dispatch_report = assemble_dispatch_report(
+            run_id=run_id,
+            filename=filename,
+            report=result,
+            narratives=narratives,
+            priority_scores=priority_matrix,
+            financial_impact=financial_impact,
+            financial_inputs_echo=financial_inputs_echo,
+            effort_method=effort_scoring_method,
+        )
+
+        # 12. Assembly: Merge all results into a single payload.
         result["narratives"] = narratives
         result["validation"] = validation
+        result["priority_matrix"] = priority_matrix
+        result["financial_impact"] = financial_impact
+        result["decision_quadrant"] = decision_quadrant
+        result["financial_calibrated"] = fin_inputs.is_calibrated
+        result["run_id"] = run_id
         del result["_for_ai"]
+        result.pop("_parsed_reviews", None)
         
         logger.info(f"Analysis completed successfully for {client_id}")
 
-        return {"report": result}
+        return {"report": result, "dispatch_report": dispatch_report}
 
     except HTTPException:
         raise
@@ -314,6 +589,94 @@ async def analyze_reviews(
     except Exception as e:
         logger.error(f"Unexpected error in analysis: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+
+# ── V9 PIPELINE ENDPOINT ─────────────────────────────────────────────────────
+# Runs the 8-node Dispatch V9 pipeline with LLM auto-switching.
+# Streams SSE progress events so the UI can show per-node status in real time.
+@app.post("/api/analyze_v9")
+async def analyze_reviews_v9(
+    request: Request,
+    csv_text: str = Form(...),            # Raw CSV as plain text string
+    total_users: str = Form(None),
+    monthly_arpu: str = Form(None),
+    sprint_cost: str = Form(None),
+    db: Session = Depends(get_db),
+):
+    """
+    V9 multi-node pipeline analysis with SSE streaming.
+    Accepts raw CSV text plus optional business inputs.
+    Returns a Server-Sent Events stream — one event per completed node.
+
+    SSE event format:
+        data: {"node": N, "label": "...", "status": "complete"|"error"|"done", "data": {...}}
+
+    Final event (node=8, status="done") contains the full context store.
+    """
+    client_id = get_client_id(request)
+    try:
+        rate_limiter.check_rate_limit(f"analyze_v9:{client_id}")
+    except RateLimitError as e:
+        raise HTTPException(
+            status_code=429,
+            detail=e.message,
+            headers={"Retry-After": str(e.details.get("retry_after", 60))}
+        )
+
+    logger.info(f"[V9] Pipeline request from {client_id}")
+
+    # Increment usage counter (non-fatal if DB unavailable)
+    try:
+        stats = db.query(UsageStats).first()
+        if not stats:
+            stats = UsageStats(id=1, count=1000)
+            db.add(stats)
+        stats.count += 1
+        db.commit()
+    except Exception as db_err:
+        logger.warning(f"[V9] Usage counter failed: {db_err}")
+
+    # Parse optional business inputs
+    business_inputs: dict = {}
+    if total_users:
+        try:
+            business_inputs["total_users"] = int(total_users)
+        except ValueError:
+            pass
+    if monthly_arpu:
+        try:
+            business_inputs["monthly_arpu"] = float(monthly_arpu)
+        except ValueError:
+            pass
+    if sprint_cost:
+        try:
+            business_inputs["sprint_cost"] = float(sprint_cost)
+        except ValueError:
+            pass
+
+    pipeline = DispatchPipeline(csv_text=csv_text, business_inputs=business_inputs)
+
+    async def event_generator():
+        """Yield SSE-formatted strings for each pipeline node event."""
+        try:
+            async for event in pipeline.run_streaming():
+                payload = json.dumps(event, ensure_ascii=False, default=str)
+                yield f"data: {payload}\n\n"
+                await asyncio.sleep(0)  # Yield control to allow response flushing
+        except Exception as exc:
+            logger.error(f"[V9] Streaming pipeline fatal: {exc}", exc_info=True)
+            error_payload = json.dumps({"status": "fatal", "error": str(exc)})
+            yield f"data: {error_payload}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ── COMPETITOR COMPARISON ENDPOINT ──────────────────────────────────────────
