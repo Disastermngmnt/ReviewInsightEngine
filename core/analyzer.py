@@ -1,98 +1,95 @@
 """
-Deterministic Analysis Engine — ReviewInsightEngine
-=====================================================
+Deterministic Analysis Engine — ReviewInsightEngine (Dispatch v3.0)
+=====================================================================
 All classification, scoring, and prioritization is done here in Python,
 with no AI involvement. Identical input always produces identical output.
 
-Priority Formula:
-  Priority Score = (Volume × 0.4) + (Avg Sentiment Impact × 0.35) + (Recency Weight × 0.25)
+Dispatch v3.0 Pre-computed Axes:
+  Pain Intensity = (avg_rating_inverse × 0.5) + (urgency_rate × 0.3) + (churn_rate × 0.2)
+  Impact Breadth = (unique_reviews / total_classified) × 10
+  Urgency Velocity = velocity_ratio mapped to 0–10 (requires date data)
 
-Sentiment Impact:
-  Positive = 1.0,  Neutral = 0.5,  Negative = 0.0
-
-Recency Weight:
-  Last 30 days = 1.0,  Last 90 days = 0.75,  Older = 0.5,  No date = 0.5
-
-Timeline buckets:
-  ≥ 0.75 → Q1 – Immediate
-  0.50–0.74 → Q2 – Near-term
-  0.30–0.49 → Q3 – Mid-term
-  < 0.30 → Q4 / Backlog
+Timeline buckets (applied to Normalized Score = Priority Score / 10):
+  ≥ 0.80 → Q1 – Ship Now
+  0.60–0.79 → Q2 – Next Quarter
+  0.40–0.59 → Q3 – Mid-term
+  < 0.40 → Q4 / Backlog
 
 Confidence:
-  > 20 mentions → High
-  10–20 → Medium
-  < 10 → Low
+  ≥ 20 unique reviews → High
+  10–19 → Medium
+  < 10 → Low ⚠
 """
 
-# Standard library imports for regex, collection utilities, and date/time handling.
-# Integrates with: Input parsing and sentiment trend calculation logic throughout this file.
+import hashlib
 import re
 from collections import defaultdict
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Any
 
-# Import of project-specific constants and configuration settings.
-# Integrates with: core/analyzer.py logic for classification, sentiment detection, and column mapping.
-from config.settings import TAXONOMY, SENTIMENT_KEYWORDS, RATING_COLUMNS, DATE_COLUMNS, COMMON_REVIEW_COLUMNS
+from config.settings import (
+    TAXONOMY, SENTIMENT_KEYWORDS, RATING_COLUMNS, DATE_COLUMNS,
+    COMMON_REVIEW_COLUMNS, URGENCY_KEYWORDS, CHURN_KEYWORDS,
+)
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-# Function to standardise input text by stripping whitespace and converting to lowercase.
-# Integrates with: All text-dependent matching functions like _classify_review and _derive_sentiment_from_text.
 def _normalise(text: str) -> str:
+    """Standardise input text for keyword matching."""
     return text.strip().lower()
 
 
-# Maps a single review to exactly one taxonomy category using keyword matching.
-# Uses: _normalise for text formatting and TAXONOMY from settings.
-# Integrates with: Analyzer.run to group reviews into logical categories for the product roadmap.
-def _classify_review(text: str) -> str:
-    """Map a review to exactly one taxonomy category deterministically.
-    Keyword matching; ties broken alphabetically by category name."""
-    # Standardise text for matching.
+def _hash_text(text: str) -> str:
+    """SHA-256 hash of a review body — used for duplicate detection and quote integrity."""
+    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
+
+
+def _classify_review_with_counts(text: str, taxonomy: dict | None = None) -> tuple[str, dict[str, int]]:
+    """
+    Dispatch v3.0 multi-category conflict resolution.
+    Returns (primary_category, {category: match_count}) for all matched categories.
+    Tie-break: alphabetical by category name (deterministic).
+    'Other' is returned only if no keywords match.
+    """
+    if taxonomy is None:
+        taxonomy = TAXONOMY
+
     text_lower = _normalise(text)
     scores: dict[str, int] = {}
-    
-    # Iterate through each category in the taxonomy to count keyword matches.
-    for category, keywords in TAXONOMY.items():
+
+    for category, keywords in taxonomy.items():
         if category == "Other":
             continue
         count = sum(1 for kw in keywords if kw in text_lower)
         if count > 0:
             scores[category] = count
-            
-    # Default to "Other" if no keywords match.
+
     if not scores:
-        return "Other"
-        
-    # Pick the category with the highest match count, tie-breaking alphabetically.
+        return "Other", {}
+
     max_score = max(scores.values())
     candidates = sorted([c for c, s in scores.items() if s == max_score])
-    return candidates[0]  # alphabetical tie-break
+    return candidates[0], scores
 
 
-# Determines sentiment label based strictly on keywords in the text.
-# Uses: SENTIMENT_KEYWORDS from settings to identify Positive/Negative tone.
-# Integrates with: Analyzer.run when a numeric rating column is absent in the input data.
+def _classify_review(text: str) -> str:
+    """Simple classification wrapper — returns primary category only."""
+    category, _ = _classify_review_with_counts(text)
+    return category
+
+
 def _derive_sentiment_from_text(text: str) -> str:
     """Keyword-based sentiment for reviews without a rating column."""
-    # Lowercase text for uniform matching.
     text_lower = _normalise(text)
-    # Check text against pre-defined lists of positive/negative keywords.
     for sentiment, keywords in SENTIMENT_KEYWORDS.items():
         if any(kw in text_lower for kw in keywords):
             return sentiment
-    # Return Neutral if no strong sentiment keywords are detected.
     return "Neutral"
 
 
-# Maps a numeric rating to a sentiment label based on the scale (e.g., 5-star vs 10-point).
-# Integrates with: Analyzer.run parsing logic to provide consistent sentiment metrics from structured data.
 def _derive_sentiment_from_rating(rating: float, scale: int) -> str:
     """Convert numeric rating to sentiment using fixed thresholds."""
-    # Logic for standard 5-point scales.
     if scale <= 5:
         if rating < 3:
             return "Negative"
@@ -100,8 +97,7 @@ def _derive_sentiment_from_rating(rating: float, scale: int) -> str:
             return "Neutral"
         else:
             return "Positive"
-    # Logic for 10-point or larger scales.
-    else:  # 1–10 scale
+    else:
         if rating < 5:
             return "Negative"
         elif rating <= 6:
@@ -110,15 +106,11 @@ def _derive_sentiment_from_rating(rating: float, scale: int) -> str:
             return "Positive"
 
 
-# Assigns a weight to a review based on how recently it was published.
-# Integrates with: Priority Score calculation in Analyzer.run to ensure recent feedback is weighted more heavily.
 def _recency_weight(date: datetime | None, now: datetime) -> float:
-    # Use baseline weight if no date is available.
+    """Weight a review by recency for AI signal context (not used in Dispatch scoring axes)."""
     if date is None:
         return 0.5
-    # Calculate day difference from 'now'.
     delta = (now - date).days
-    # High weight for last month, medium for last quarter, lower for older.
     if delta <= 30:
         return 1.0
     elif delta <= 90:
@@ -127,50 +119,45 @@ def _recency_weight(date: datetime | None, now: datetime) -> float:
         return 0.5
 
 
-# Converts text labels into a numeric representation of impact.
-# Integrates with: Aggregated scoring in Analyzer.run for ranking roadmap categories.
 def _sentiment_impact(sentiment: str) -> float:
-    # Positive gives full impact, Neutral middle, Negative zero impact.
+    """Converts sentiment label to numeric impact for legacy score."""
     return {"Positive": 1.0, "Neutral": 0.5, "Negative": 0.0}.get(sentiment, 0.5)
 
 
-# Generates a confidence label based on the volume of data points detected.
-# Integrates with: The frontend roadmap UI and meta-reports to indicate statistical significance.
 def _confidence_label(volume: int) -> str:
-    # High confidence for large samples, Medium for moderate, Low for small samples.
-    if volume > 20:
+    """Dispatch v3.0 confidence thresholds: ≥20 High, 10-19 Medium, <10 Low."""
+    if volume >= 20:
         return "High"
     elif volume >= 10:
         return "Medium"
     else:
-        return "Low"
+        return "Low ⚠"
 
 
-# Maps a priority score to a human-readable timeline bucket.
-# Integrates with: The Product Roadmap UI component to group items into time horizons (Q1-Q4).
-def _timeline_bucket(score: float) -> str:
-    # High scores are immediate (Q1), decreasing scores move further out.
-    if score >= 0.75:
-        return "Q1 – Immediate"
-    elif score >= 0.50:
-        return "Q2 – Near-term"
-    elif score >= 0.30:
+def _timeline_bucket(normalized_score: float) -> str:
+    """
+    Dispatch v3.0 timeline assignment applied to Normalized Score (0–1).
+    ≥ 0.80 → Q1 – Ship Now
+    0.60–0.79 → Q2 – Next Quarter
+    0.40–0.59 → Q3 – Mid-term
+    < 0.40 → Q4 / Backlog
+    """
+    if normalized_score >= 0.80:
+        return "Q1 – Ship Now"
+    elif normalized_score >= 0.60:
+        return "Q2 – Next Quarter"
+    elif normalized_score >= 0.40:
         return "Q3 – Mid-term"
     else:
         return "Q4 / Backlog"
 
 
-# Identifies the most likely column name for a given purpose (e.g., 'Review') from a list of strings.
-# Integrates with: File parsing workflows in Analyzer.run to handle flexible CSV/XLSX schemas.
 def _detect_column(columns: list[str], candidates: list[str]) -> str | None:
     """Find first column matching a candidate list (case-insensitive)."""
-    # Create a lowercase list of column headers for case-insensitive comparison.
     col_lower = [c.strip().lower() for c in columns]
-    # Check for exact case-insensitive matches against candidate names.
     for candidate in candidates:
         if candidate.lower() in col_lower:
             return columns[col_lower.index(candidate.lower())]
-    # Fallback to partial matching if no exact match is found.
     for candidate in candidates:
         for i, col in enumerate(col_lower):
             if candidate.lower() in col:
@@ -178,15 +165,11 @@ def _detect_column(columns: list[str], candidates: list[str]) -> str | None:
     return None
 
 
-# Identifies the rating column and automatically determines if it's a 5-point or 10-point scale.
-# Integrates with: _derive_sentiment_from_rating to ensure sentiment thresholds are scale-aware.
 def _detect_rating_column(df_columns: list[str], data: list[list]) -> tuple[str | None, int]:
     """Detect rating column and infer scale (5 or 10)."""
-    # Use generic column detection to find the specific rating header.
     col = _detect_column(df_columns, RATING_COLUMNS)
     if col is None:
         return None, 5
-    # Inspect the actual data rows to determine the maximum value (scale).
     col_idx = df_columns.index(col)
     vals = []
     for row in data:
@@ -197,51 +180,406 @@ def _detect_rating_column(df_columns: list[str], data: list[list]) -> tuple[str 
             pass
     if not vals:
         return col, 5
-    # If any value exceeds 5, assume a 10-point scale; otherwise default to 5.
     scale = 10 if max(vals) > 5 else 5
     return col, scale
 
 
-# ── Main Analyzer ─────────────────────────────────────────────────────────────
+# ── Dispatch v3.0 Formula Helpers ─────────────────────────────────────────────
 
-# Main entry point for the deterministic analysis engine.
-# Integrates with: main.py API endpoint (/api/analyze) to process raw user uploads.
+def _compute_pain_intensity(reviews: list[dict], rating_scale: int = 5) -> tuple[float, dict]:
+    """
+    Dispatch v3.0 Pain Intensity (0–10):
+    Formula: (avg_rating_inverse × 0.5) + (urgency_language_rate × 0.3) + (churn_signal_rate × 0.2)
+    avg_rating_inverse = (5 - avg_rating) / 4 × 10  [clamped to scale=5 reference]
+    """
+    total = len(reviews)
+    if total == 0:
+        return 0.0, {}
+
+    rated = [r for r in reviews if r.get("rating") is not None]
+    if rated:
+        avg_rating = sum(r["rating"] for r in rated) / len(rated)
+        # Normalise to 5-star reference for the Dispatch formula
+        if rating_scale == 10:
+            avg_rating_5 = avg_rating / 2.0
+        else:
+            avg_rating_5 = avg_rating
+        avg_rating_inverse = ((5 - avg_rating_5) / 4) * 10
+        avg_rating_inverse = max(0.0, min(10.0, avg_rating_inverse))
+    else:
+        avg_rating = None
+        avg_rating_5 = None
+        avg_rating_inverse = 5.0  # neutral default
+
+    text_lower_list = [r["text"].strip().lower() for r in reviews]
+
+    urgency_count = sum(
+        1 for t in text_lower_list
+        if any(kw in t for kw in URGENCY_KEYWORDS)
+    )
+    churn_count = sum(
+        1 for t in text_lower_list
+        if any(kw in t for kw in CHURN_KEYWORDS)
+    )
+
+    urgency_rate = urgency_count / total
+    churn_rate = churn_count / total
+
+    pain = (avg_rating_inverse * 0.5) + (urgency_rate * 10 * 0.3) + (churn_rate * 10 * 0.2)
+    pain = round(max(0.0, min(10.0, pain)), 2)
+
+    # Flag extremes
+    extreme_flag = None
+    if avg_rating_5 is not None and avg_rating_5 <= 1.5 and churn_rate > 0.20:
+        extreme_flag = "[EXTREME — verify manually]"
+    elif avg_rating is not None and avg_rating == (5.0 if rating_scale == 5 else 10.0) and urgency_count == 0 and churn_count == 0:
+        extreme_flag = "[EXTREME — verify manually]"
+
+    audit = {
+        "avg_rating": round(avg_rating, 2) if avg_rating is not None else None,
+        "avg_rating_5ref": round(avg_rating_5, 2) if avg_rating_5 is not None else None,
+        "avg_rating_inverse": round(avg_rating_inverse, 2),
+        "rated_reviews": len(rated),
+        "urgency_count": urgency_count,
+        "urgency_rate_pct": round(urgency_rate * 100, 1),
+        "churn_count": churn_count,
+        "churn_rate_pct": round(churn_rate * 100, 1),
+        "formula": f"Pain: ({round(avg_rating_inverse,2)} × 0.5) + ({round(urgency_rate*10,2)} × 0.3) + ({round(churn_rate*10,2)} × 0.2)",
+        "extreme_flag": extreme_flag,
+    }
+    return pain, audit
+
+
+def _compute_impact_breadth(item_review_count: int, total_classified: int) -> tuple[float, str]:
+    """
+    Dispatch v3.0 Impact Breadth (0–10):
+    Formula: (unique reviews for item / total classified reviews) × 10
+    """
+    if total_classified == 0:
+        return 0.0, "Impact: 0.0 — 0 classified reviews"
+    breadth = min(10.0, (item_review_count / total_classified) * 10)
+    breadth = round(breadth, 2)
+    pct = round(item_review_count / total_classified * 100, 1)
+    audit = f"Impact: {breadth} — {item_review_count} of {total_classified} classified reviews ({pct}%)"
+    return breadth, audit
+
+
+def _compute_urgency_velocity(reviews: list[dict]) -> tuple[float | None, dict]:
+    """
+    Dispatch v3.0 Urgency Velocity (0–10) — requires date data.
+    Split reviews at date midpoint; compare first vs second half mention counts.
+    velocity_ratio = (second_half - first_half) / first_half
+    Mapping: ratio > 0.20 → 8–10; -0.20 to 0.20 → 4–7; < -0.20 → 0–3
+    Returns None if no date data is available.
+    """
+    dated = [r for r in reviews if r.get("date") is not None]
+    if len(dated) < 2:
+        return None, {"reason": "Insufficient date data — axis excluded"}
+
+    dates = [r["date"] for r in dated]
+    min_d = min(dates)
+    max_d = max(dates)
+    mid_d = min_d + (max_d - min_d) / 2
+
+    first_half = [r for r in dated if r["date"] <= mid_d]
+    second_half = [r for r in dated if r["date"] > mid_d]
+
+    first_count = len(first_half)
+    second_count = len(second_half)
+
+    if first_count == 0:
+        # All reviews in second half — treat as accelerating
+        velocity_ratio = 1.0
+    else:
+        velocity_ratio = (second_count - first_count) / first_count
+
+    # Map velocity_ratio to 0–10 score
+    if velocity_ratio > 0.20:
+        # Map linearly 8–10
+        score = 8.0 + min(2.0, (velocity_ratio - 0.20) / 0.80 * 2.0)
+    elif velocity_ratio >= -0.20:
+        # Map linearly 4–7
+        score = 4.0 + ((velocity_ratio + 0.20) / 0.40) * 3.0
+    else:
+        # Map linearly 0–3
+        score = max(0.0, 3.0 + ((velocity_ratio + 0.20) / 0.20) * 3.0)
+
+    score = round(max(0.0, min(10.0, score)), 2)
+    change_pct = round(velocity_ratio * 100, 1)
+    sign = "+" if change_pct >= 0 else ""
+
+    audit = {
+        "score": score,
+        "first_half_count": first_count,
+        "second_half_count": second_count,
+        "first_half_range": f"{min_d.strftime('%Y-%m-%d')}–{mid_d.strftime('%Y-%m-%d')}",
+        "second_half_range": f"{mid_d.strftime('%Y-%m-%d')}–{max_d.strftime('%Y-%m-%d')}",
+        "change_pct": f"{sign}{change_pct}%",
+        "velocity_ratio": round(velocity_ratio, 3),
+    }
+    return score, audit
+
+
+# ── Pre-Flight Validation ──────────────────────────────────────────────────────
+
+def run_preflight_checks(
+    parsed: list[dict],
+    raw_data: list[list],
+    date_col_present: bool,
+) -> dict:
+    """
+    Dispatch v3.0 Pre-Flight Validation (all 6 checks).
+    Returns structured result dict with status per check.
+    """
+    total = len(parsed)
+    checks = {}
+
+    # CHECK 1 — Classification Coverage
+    other_count = sum(1 for r in parsed if r["category"] == "Other")
+    other_pct = round(other_count / max(1, total) * 100, 1)
+    if other_pct < 15:
+        cov_status = "PASS"
+    elif other_pct <= 25:
+        cov_status = "WARN"
+    else:
+        cov_status = "FAIL"
+    checks["check_1_classification_coverage"] = {
+        "status": cov_status,
+        "other_count": other_count,
+        "other_pct": other_pct,
+        "threshold_warn": 15,
+        "threshold_fail": 25,
+        "message": f"Other category: {other_count} reviews ({other_pct}%)",
+    }
+
+    # CHECK 2 — Duplicate Review Detection
+    hashes: dict[str, int] = {}
+    for r in parsed:
+        h = _hash_text(r["text"])
+        hashes[h] = hashes.get(h, 0) + 1
+    dup_count = sum(v - 1 for v in hashes.values() if v > 1)
+    dup_pct = round(dup_count / max(1, total) * 100, 1)
+    checks["check_2_duplicate_detection"] = {
+        "status": "WARN" if dup_count > 0 else "PASS",
+        "duplicates_found": dup_count,
+        "duplicates_pct": dup_pct,
+        "pre_dedup_count": total,
+        "post_dedup_count": total - dup_count,
+        "message": f"{dup_count} duplicates found ({dup_pct}% of total). Removed before scoring.",
+    }
+
+    # CHECK 3 — Quote Integrity (no duplicate quotes across categories)
+    # Assign each quote text to its highest-confidence category only
+    quote_hash_to_category: dict[str, str] = {}
+    quote_conflicts = 0
+    for r in parsed:
+        h = _hash_text(r["text"])
+        if h in quote_hash_to_category:
+            if quote_hash_to_category[h] != r["category"]:
+                quote_conflicts += 1
+        else:
+            quote_hash_to_category[h] = r["category"]
+    checks["check_3_quote_integrity"] = {
+        "status": "WARN" if quote_conflicts > 0 else "PASS",
+        "conflict_count": quote_conflicts,
+        "message": f"Quote assignment conflicts resolved: {quote_conflicts}",
+    }
+
+    # CHECK 4 — Sentiment Acceleration Alert (WoW comparison)
+    acceleration_alert = None
+    if date_col_present:
+        dated = [r for r in parsed if r.get("date") is not None]
+        if dated:
+            max_date = max(r["date"] for r in dated)
+            # Most recent week vs prior week
+            week_start_current = max_date - __import__("datetime").timedelta(days=7)
+            week_start_prior = max_date - __import__("datetime").timedelta(days=14)
+
+            current_week = [r for r in dated if r["date"] >= week_start_current]
+            prior_week = [r for r in dated if week_start_prior <= r["date"] < week_start_current]
+
+            if current_week and prior_week:
+                curr_neg_pct = sum(1 for r in current_week if r["sentiment"] == "Negative") / len(current_week) * 100
+                prior_neg_pct = sum(1 for r in prior_week if r["sentiment"] == "Negative") / len(prior_week) * 100
+                delta = curr_neg_pct - prior_neg_pct
+                if delta > 15:
+                    # Find top driving category for current week
+                    cat_neg = defaultdict(int)
+                    for r in current_week:
+                        if r["sentiment"] == "Negative":
+                            cat_neg[r["category"]] += 1
+                    top_cat = max(cat_neg, key=cat_neg.get) if cat_neg else "Unknown"
+                    acceleration_alert = {
+                        "triggered": True,
+                        "prior_neg_pct": round(prior_neg_pct, 1),
+                        "current_neg_pct": round(curr_neg_pct, 1),
+                        "delta": round(delta, 1),
+                        "week_id": max_date.strftime("%Y-W%W"),
+                        "top_driving_category": top_cat,
+                        "top_cat_negative_count": cat_neg.get(top_cat, 0),
+                    }
+
+    checks["check_4_sentiment_acceleration"] = {
+        "status": "ALERT" if acceleration_alert and acceleration_alert.get("triggered") else "PASS",
+        "alert_data": acceleration_alert,
+        "message": (
+            f"ALERT: Negative sentiment increased from {acceleration_alert['prior_neg_pct']}% "
+            f"to {acceleration_alert['current_neg_pct']}% (+{acceleration_alert['delta']}%) WoW"
+            if acceleration_alert and acceleration_alert.get("triggered")
+            else "No significant negative sentiment acceleration detected."
+        ),
+    }
+
+    # CHECK 5 — Score Auditability (date data presence)
+    checks["check_5_score_auditability"] = {
+        "status": "WARN" if not date_col_present else "PASS",
+        "has_date_data": date_col_present,
+        "urgency_velocity_available": date_col_present,
+        "weights_rebalanced": not date_col_present,
+        "message": (
+            "Date column detected — Urgency Velocity axis active."
+            if date_col_present
+            else "No date column — Urgency Velocity N/A. Weights rebalanced: Pain×0.375, Impact×0.3125, Strategic×0.1875, Effort×0.125 [No Velocity Axis]"
+        ),
+    }
+
+    # CHECK 6 — Minimum Data Threshold
+    non_other_total = sum(1 for r in parsed if r["category"] != "Other")
+    low_conf_categories = []
+    cat_counts: dict[str, int] = defaultdict(int)
+    for r in parsed:
+        if r["category"] != "Other":
+            cat_counts[r["category"]] += 1
+    for cat, cnt in cat_counts.items():
+        if cnt < 10:
+            low_conf_categories.append({"category": cat, "count": cnt})
+
+    if non_other_total < 30:
+        min_status = "WARN"
+        min_msg = f"Only {non_other_total} classified reviews — results directional only. Minimum recommended: 30."
+    else:
+        min_status = "PASS"
+        min_msg = f"{non_other_total} classified reviews — sufficient for analysis."
+
+    checks["check_6_minimum_data"] = {
+        "status": min_status,
+        "classified_count": non_other_total,
+        "watch_list_categories": low_conf_categories,
+        "message": min_msg,
+    }
+
+    # Overall summary
+    statuses = [v["status"] for v in checks.values()]
+    passed = statuses.count("PASS")
+    warned = statuses.count("WARN")
+    failed = statuses.count("FAIL")
+    alerted = statuses.count("ALERT")
+
+    return {
+        "checks": checks,
+        "summary": {
+            "passed": passed,
+            "warned": warned,
+            "failed": failed,
+            "alerted": alerted,
+            "halt": failed > 0,
+            "display": f"{passed} passed / {warned} warned / {failed} failed / {alerted} alerted",
+        },
+    }
+
+
+# ── Quote Selection (Dispatch v3.0) ────────────────────────────────────────────
+
+def _select_quotes(reviews: list[dict], n: int = 3, used_hashes: set | None = None) -> list[dict]:
+    """
+    Dispatch v3.0 quote selection priority:
+    1. Churn-signal language
+    2. Urgency language
+    3. Lowest star rating
+    4. Most specific feature reference
+    No quote may appear in more than one location (enforced via used_hashes).
+    """
+    if used_hashes is None:
+        used_hashes = set()
+
+    def _quote_priority(r: dict) -> tuple:
+        text_lower = r["text"].strip().lower()
+        has_churn = any(kw in text_lower for kw in CHURN_KEYWORDS)
+        has_urgency = any(kw in text_lower for kw in URGENCY_KEYWORDS)
+        rating = r.get("rating") or 5.0
+        text_len = len(r["text"])
+        # Lower tuple value = higher priority
+        return (
+            0 if has_churn else 1,       # churn first
+            0 if has_urgency else 1,      # then urgency
+            round(rating, 1),             # lower rating = higher priority
+            -text_len,                    # longer = more specific
+        )
+
+    selected = []
+    for r in sorted(reviews, key=_quote_priority):
+        h = _hash_text(r["text"])
+        if h in used_hashes:
+            continue
+        used_hashes.add(h)
+
+        text_lower = r["text"].strip().lower()
+        has_churn = any(kw in text_lower for kw in CHURN_KEYWORDS)
+        has_urgency = any(kw in text_lower for kw in URGENCY_KEYWORDS)
+
+        signal_type = "churn" if has_churn else ("urgency" if has_urgency else "low-rating")
+
+        selected.append({
+            "text": r["text"][:500],
+            "sentiment": r.get("sentiment", "Neutral"),
+            "rating": r.get("rating"),
+            "date": r["date"].strftime("%Y-%m-%d") if r.get("date") else None,
+            "signal_type": signal_type,
+            "hash": h,
+        })
+        if len(selected) >= n:
+            break
+
+    return selected
+
+
+# ── Main Analyzer ──────────────────────────────────────────────────────────────
+
 class Analyzer:
-    # Executes the full analysis pipeline: Detection -> Parsing -> Categorization -> Scoring.
-    # Integrates with: AIEngine and SynthesisEngine by providing the base data for narrative generation.
-    def run(self, columns: list[str], data: list[list]) -> dict[str, Any]:
-        """
-        Deterministic analysis. Returns fully structured result dict.
-        """
-        # Capture current time for recency calculations.
-        now = datetime.now(tz=timezone.utc)
+    """
+    Deterministic analysis engine — Dispatch v3.0 compliant.
+    Integrates with: main.py API endpoint (/api/analyze).
+    """
 
-        # 1. Automated Detection of relevant columns (Review, Rating, Date).
-        # Integrates with: Input data mapping to ensure logic targets the correct text and metrics.
+    def run(self, columns: list[str], data: list[list], custom_taxonomy: dict | None = None) -> dict[str, Any]:
+        """
+        Dispatch v3.0 deterministic analysis.
+        Returns fully structured result dict including preflight checks,
+        Dispatch axis scores, and deduplicated quote pools.
+        """
+        now = datetime.now(tz=timezone.utc)
+        active_taxonomy = custom_taxonomy if custom_taxonomy else TAXONOMY
+
+        # 1. Column detection
         review_col = _detect_column(columns, COMMON_REVIEW_COLUMNS)
         if review_col is None and columns:
-            # Fallback: Treat the first column as the review text if no match is found.
             review_col = columns[0]
 
         rating_col, rating_scale = _detect_rating_column(columns, data)
         date_col = _detect_column(columns, DATE_COLUMNS)
 
-        # Map column names to positional indices for faster row iteration.
         review_idx = columns.index(review_col) if review_col in columns else 0
         rating_idx = columns.index(rating_col) if rating_col and rating_col in columns else None
         date_idx = columns.index(date_col) if date_col and date_col in columns else None
 
-        # 2. Iterate through data rows to parse text, ratings, and dates into structured dicts.
-        # Uses: _derive_sentiment_from_rating, _derive_sentiment_from_text, _recency_weight, and _classify_review.
-        # Integrates with: The aggregation step to provide clean objects for statistical processing.
+        # 2. Parse rows
         parsed: list[dict] = []
+        seen_hashes: set[str] = set()  # for duplicate detection
         for row in data:
-            # Extract review text, skipping empty or invalid entries.
             text = str(row[review_idx]) if review_idx < len(row) else ""
             if not text or text.strip() in ("", "nan"):
                 continue
 
-            # Extract numeric rating if available.
             rating = None
             if rating_idx is not None and rating_idx < len(row):
                 try:
@@ -249,153 +587,234 @@ class Analyzer:
                 except (ValueError, TypeError):
                     pass
 
-            # Determine sentiment using either the rating or a keyword scan of the text.
             sentiment = (
                 _derive_sentiment_from_rating(rating, rating_scale)
                 if rating is not None
                 else _derive_sentiment_from_text(text)
             )
 
-            # Extract and parse date strings into timezone-aware datetime objects.
             date: datetime | None = None
             if date_idx is not None and date_idx < len(row):
                 try:
-                    d = row[date_idx]
-                    if d and str(d).strip():
-                        import dateutil.parser
-                        date = dateutil.parser.parse(str(d))
-                        if date.tzinfo is None:
-                            date = date.replace(tzinfo=timezone.utc)
+                    d = str(row[date_idx]).strip()
+                    if d and d not in ("nan", ""):
+                        col_name = columns[date_idx].strip().lower()
+                        if col_name == "reviewed at":
+                            # Strict parsing for specific schema, bypass dateutil fallback
+                            date = datetime.strptime(d, '%Y-%m-%d %H:%M:%S')
+                            if date.tzinfo is None:
+                                date = date.replace(tzinfo=timezone.utc)
+                        else:
+                            # Primary: the exact ISO subset formatting
+                            try:
+                                date = datetime.strptime(d, '%Y-%m-%d %H:%M:%S')
+                                if date.tzinfo is None:
+                                    date = date.replace(tzinfo=timezone.utc)
+                            except ValueError:
+                                # Fallback
+                                import dateutil.parser
+                                date = dateutil.parser.parse(d)
+                                if date.tzinfo is None:
+                                    date = date.replace(tzinfo=timezone.utc)
                 except Exception:
                     date = None
 
-            # Categorise the review into a logical theme (e.g., UI, Performance).
-            category = _classify_review(text)
+            # Multi-category classification with match counts
+            category, match_counts = _classify_review_with_counts(text, taxonomy=active_taxonomy)
+            review_hash = _hash_text(text)
 
-            # Assemble the structured review object with calculated weights.
             parsed.append({
                 "text": text,
                 "rating": rating,
                 "sentiment": sentiment,
                 "date": date,
                 "category": category,
+                "match_counts": match_counts,
                 "recency_weight": _recency_weight(date, now),
                 "sentiment_impact": _sentiment_impact(sentiment),
+                "hash": review_hash,
+                "is_duplicate": review_hash in seen_hashes,
             })
+            seen_hashes.add(review_hash)
 
-        # Early exit if no data could be successfully processed.
         if not parsed:
             return {"error": "No valid reviews could be parsed."}
 
-        # 3. Group the parsed reviews by their assigned categories for batch analysis.
-        # Integrates with: Priority Score and Roadmap Item generation to compute metrics per theme.
+        # 3. Deduplicate (keep first occurrence)
+        deduped: list[dict] = []
+        seen: set[str] = set()
+        for r in parsed:
+            if r["hash"] not in seen:
+                deduped.append(r)
+                seen.add(r["hash"])
+        dup_removed = len(parsed) - len(deduped)
+
+        total = len(deduped)
+
+        # 4. Pre-flight validation
+        preflight = run_preflight_checks(deduped, data, date_col_present=bool(date_col))
+
+        # OTHER ELIMINATION (Dispatch v3.0) — Reclassify or noise
+        for r in deduped:
+            if r["category"] == "Other":
+                text_lower = _normalise(r["text"])
+                reclassified = False
+                for cat, keywords in active_taxonomy.items():
+                    if cat == "Other": continue
+                    # Expanded signal matching: check partial matches from multi-word keywords
+                    for kw in keywords:
+                        kw_words = kw.split()
+                        if len(kw_words) > 1 and any(w in text_lower for w in kw_words if len(w) > 4):
+                            r["category"] = cat
+                            reclassified = True
+                            break
+                    if reclassified: break
+                if not reclassified:
+                    r["category"] = "NOISE POOL"
+
+        # 5. Group by category (excluding Other/NOISE from roadmap but keep for stats)
         cat_groups: dict[str, list[dict]] = defaultdict(list)
-        for p in parsed:
-            cat_groups[p["category"]].append(p)
+        for r in deduped:
+            cat_groups[r["category"]].append(r)
 
-        # 4. Compute metrics and priority scores for each category to build the roadmap.
-        # Uses: _confidence_label, _timeline_bucket, and _sentiment_impact (pre-calculated).
-        # Integrates with: The frontend Roadmap card and the high-level executive summary.
-        max_vol = max(len(v) for v in cat_groups.values()) or 1
+        total_classified = sum(len(v) for k, v in cat_groups.items() if k not in ("Other", "NOISE POOL"))
 
+        # Ensure all taxonomy categories are processed (Zero-Review block check)
+        for cat in active_taxonomy.keys():
+            if cat not in ("Other", "NOISE POOL") and cat not in cat_groups:
+                cat_groups[cat] = []
+
+        # 6. Compute Dispatch axes per category
         roadmap_items: list[dict] = []
+        watch_list: list[dict] = []
+
         for category in sorted(cat_groups.keys()):
+            if category in ("Other", "NOISE POOL"):
+                continue  # Never appears in roadmap — Dispatch rule
+
             reviews = cat_groups[category]
             volume = len(reviews)
-            # Calculate averages for impacts and recency within this specific theme.
-            avg_sentiment_impact = sum(r["sentiment_impact"] for r in reviews) / volume
-            avg_recency = sum(r["recency_weight"] for r in reviews) / volume
-            # Normalize volume relative to the largest category for fair scoring.
-            norm_volume = volume / max_vol  # Normalise 0–1
+            
+            if volume == 0:
+                # ZERO-REVIEW SCORING BLOCK (Dispatch v3.0)
+                watch_list.append({
+                    "category": category,
+                    "volume": 0,
+                    "confidence": "None",
+                    "message": "No reviews classified — cannot score. Expand taxonomy or collect more data before actioning.",
+                    "sentiment_breakdown": {"Positive": 0, "Neutral": 0, "Negative": 0},
+                    "avg_rating": None,
+                    "churn_signal_count": 0,
+                    "expansion_signal_count": 0,
+                    "urgency_density": 0,
+                    "pain_intensity_precomputed": None,
+                    "impact_breadth_precomputed": None,
+                    "urgency_velocity_precomputed": None
+                })
+                continue
 
-            # The Core Priority Formula: Balances popularity, sentiment severity, and recency.
-            # Integrates with: Business decision making and automated roadmap prioritization.
-            priority_score = round(
-                (norm_volume * 0.4) + (avg_sentiment_impact * 0.35) + (avg_recency * 0.25),
-                2
-            )
-            # Count individual sentiment instances for chart visualizations.
+            confidence = _confidence_label(volume)
+
+            # Pain Intensity [F: Pain Intensity formula]
+            pain_score, pain_audit = _compute_pain_intensity(reviews, rating_scale)
+
+            # Impact Breadth [F: Impact Breadth formula]
+            impact_score, impact_audit_str = _compute_impact_breadth(volume, total_classified)
+
+            # Urgency Velocity [F: Urgency Velocity formula] or N/A
+            velocity_score, velocity_audit = _compute_urgency_velocity(reviews)
+            velocity_available = velocity_score is not None
+
+            # Sentiment breakdown
             pos = sum(1 for r in reviews if r["sentiment"] == "Positive")
             neg = sum(1 for r in reviews if r["sentiment"] == "Negative")
-            neu = sum(1 for r in reviews if r["sentiment"] == "Neutral")
+            neu = volume - pos - neg
 
-            # Calculate average rating if numeric data was available.
             avg_rating = (
                 round(sum(r["rating"] for r in reviews if r["rating"] is not None) /
                       max(1, sum(1 for r in reviews if r["rating"] is not None)), 2)
                 if rating_col else None
             )
 
-            # Assemble the final roadmap item with all necessary flags for the UI.
-            roadmap_items.append({
+            # Churn signal count for financial model
+            churn_count = sum(
+                1 for r in reviews
+                if any(kw in r["text"].strip().lower() for kw in CHURN_KEYWORDS)
+            )
+
+            # Expansion signal count for financial model
+            from config.settings import EXPANSION_KEYWORDS
+            expansion_count = sum(
+                1 for r in reviews
+                if any(kw in r["text"].strip().lower() for kw in EXPANSION_KEYWORDS)
+            )
+
+            item_data = {
                 "category": category,
                 "volume": volume,
+                "confidence": confidence,
+                "message": f"Low volume ({volume}) — scores may be volatile." if volume < 10 else "Sufficient data",
                 "sentiment_breakdown": {"Positive": pos, "Neutral": neu, "Negative": neg},
                 "avg_rating": avg_rating,
-                "priority_score": priority_score,
-                "confidence": _confidence_label(volume),
-                "timeline": _timeline_bucket(priority_score),
-                "norm_volume": norm_volume,
-            })
+                # Dispatch axes (pre-computed deterministically for AI context)
+                "pain_intensity_precomputed": pain_score,
+                "impact_breadth_precomputed": impact_score,
+                "urgency_velocity_precomputed": velocity_score,
+                "velocity_audit": velocity_audit,
+                "pain_audit": pain_audit,
+                "impact_audit": impact_audit_str,
+                "velocity_available": velocity_available,
+                # Financial model signals
+                "churn_signal_count": churn_count,
+                "expansion_signal_count": expansion_count,
+                "urgency_density": round(
+                    sum(1 for r in reviews if any(kw in r["text"].strip().lower() for kw in URGENCY_KEYWORDS)) / max(1, volume),
+                    3
+                ),
+            }
 
-        # Ensure items are ordered by priority score (descending) so the most critical items appear first.
-        roadmap_items.sort(key=lambda x: (-x["priority_score"], x["category"]))
+            # Watch list for low-confidence categories
+            if volume < 10:
+                watch_list.append(item_data)
+            else:
+                roadmap_items.append(item_data)
 
-        # Assign a numerical rank to each item for clear sequential reading.
+        # 7. Legacy priority score (for initial sort before AI axes) — will be replaced by Dispatch scorer
+        max_vol = max((len(cat_groups[c]) for c in cat_groups if c not in ("Other", "NOISE POOL")), default=1)
+        for item in roadmap_items:
+            vol = item["volume"]
+            reviews = cat_groups[item["category"]]
+            avg_si = sum(r["sentiment_impact"] for r in reviews) / max(1, vol)
+            avg_rec = sum(r["recency_weight"] for r in reviews) / max(1, vol)
+            norm_vol = vol / max_vol
+            item["_legacy_priority"] = round((norm_vol * 0.4) + (avg_si * 0.35) + (avg_rec * 0.25), 2)
+
+        roadmap_items.sort(key=lambda x: (-x["_legacy_priority"], x["category"]))
         for i, item in enumerate(roadmap_items):
             item["rank"] = i + 1
 
-        # 5. Extract verbatim quotes for the top 3 roadmap items to provide qualitative context.
-        # Integrates with: The 'Verbatim Highlights' section of the UI to show 'the voice of the customer'.
-        top_3_verbatims: list[dict] = []
-        for item in roadmap_items[:3]:
-            reviews = cat_groups[item["category"]]
-            # Heuristic for the 'best' quotes: prioritize Negative (to see pain points) and longer text for detail.
-            scored = sorted(
-                reviews,
-                key=lambda r: (
-                    0 if r["sentiment"] == "Negative" else
-                    1 if r["sentiment"] == "Neutral" else 2,
-                    -len(r["text"])
-                )
-            )
-            # Take the top 3 scored quotes for this category.
-            quotes = []
-            for r in scored[:3]:
-                quotes.append({
-                    "text": r["text"][:500],
-                    "sentiment": r["sentiment"],
-                    "rating": r["rating"],
-                    "date": r["date"].strftime("%Y-%m-%d") if r["date"] else None,
-                })
-            top_3_verbatims.append({"category": item["category"], "quotes": quotes})
-
-        # 6. Calculate total sentiment distribution across the entire dataset.
-        # Integrates with: The global Sentiment Score donut chart on the dashboard.
-        total = len(parsed)
-        pos_total = sum(1 for r in parsed if r["sentiment"] == "Positive")
-        neg_total = sum(1 for r in parsed if r["sentiment"] == "Negative")
+        # 8. Sentiment distribution
+        pos_total = sum(1 for r in deduped if r["sentiment"] == "Positive")
+        neg_total = sum(1 for r in deduped if r["sentiment"] == "Negative")
         neu_total = total - pos_total - neg_total
 
-        # 7. Aggregate sentiment trends over time into buckets (Monthly or Weekly).
-        # Integrates with: The 'Sentiment Trend Over Time' line chart in the report.
-        sentiment_trend = {}
+        # 9. Sentiment trend (weekly or monthly)
+        sentiment_trend: dict = {}
         if date_col:
-            dated = [r for r in parsed if r["date"] is not None]
+            dated = [r for r in deduped if r.get("date") is not None]
             if dated:
                 min_date = min(r["date"] for r in dated)
                 max_date = max(r["date"] for r in dated)
                 date_range_days = (max_date - min_date).days
-                # Choose Monthly buckets for long ranges, Weekly for short ones.
                 bucket_fmt = "%Y-%m" if date_range_days > 90 else "%Y-W%W"
 
-                # Aggregate counts per bucket.
-                buckets: dict[str, dict] = defaultdict(lambda: {"Positive": 0, "Neutral": 0, "Negative": 0})
+                buckets: dict[str, dict] = defaultdict(
+                    lambda: {"Positive": 0, "Neutral": 0, "Negative": 0}
+                )
                 for r in dated:
                     key = r["date"].strftime(bucket_fmt)
                     buckets[key][r["sentiment"]] += 1
 
-                # Format data for Chart.js (labels and data arrays).
                 sorted_keys = sorted(buckets.keys())
                 sentiment_trend = {
                     "labels": sorted_keys,
@@ -404,42 +823,8 @@ class Analyzer:
                     "negative": [buckets[k]["Negative"] for k in sorted_keys],
                 }
 
-        # 8. Risk detection: Identifies potential statistical biases or data quality issues.
-        # Integrates with: The 'Potential Risks' warning panel in the UI to alert analysts of data skew.
-        risks: list[str] = []
-        # Check for categories with low mention counts.
-        low_conf_cats = [i["category"] for i in roadmap_items if i["confidence"] == "Low"]
-        if low_conf_cats:
-            risks.append(
-                f"Low data confidence in: {', '.join(low_conf_cats)}. "
-                "These categories have fewer than 10 mentions and may be underrepresented."
-            )
-
-        # Check for extreme recency bias in the dataset.
-        if date_col:
-            dated = [r for r in parsed if r["date"] is not None]
-            if dated:
-                last_30 = sum(1 for r in dated if (now - r["date"]).days <= 30)
-                if last_30 / max(1, len(dated)) > 0.7:
-                    risks.append("Recency bias detected: over 70% of reviews are from the last 30 days.")
-
-        # Check for rating ceiling/floor effects (responses clustered at extremes).
-        if rating_col and total >= 5:
-            ratings_all = [r["rating"] for r in parsed if r["rating"] is not None]
-            if ratings_all:
-                high = sum(1 for r in ratings_all if r >= (4 if rating_scale == 5 else 8))
-                low = sum(1 for r in ratings_all if r <= (2 if rating_scale == 5 else 3))
-                if high / len(ratings_all) > 0.8:
-                    risks.append("Rating ceiling effect: over 80% of ratings are at the top of the scale.")
-                if low / len(ratings_all) > 0.8:
-                    risks.append("Rating floor effect: over 80% of ratings are at the bottom of the scale.")
-
-        # Identify reviews that didn't match any specific taxonomy categories.
-        unclassified = [r for r in parsed if r["category"] == "Other"]
-
-        # 9. Extract the start and end dates of the processed review period.
-        # Integrates with: The 'Analysis Period' badge in the report header.
-        all_dated = [r for r in parsed if r["date"] is not None]
+        # 10. Date range
+        all_dated = [r for r in deduped if r.get("date") is not None]
         date_range = None
         if all_dated:
             date_range = {
@@ -447,42 +832,76 @@ class Analyzer:
                 "to": max(r["date"] for r in all_dated).strftime("%Y-%m-%d"),
             }
 
-        # 10. Identify the top 3 themes by mentions.
-        # Integrates with: Executive summary and narrative prose generation.
+        # 11. Representative quotes per top-5 categories (deduplicated)
+        used_quote_hashes: set[str] = set()
+        representative_quotes: list[dict] = []
+        for item in roadmap_items[:5]:
+            reviews = cat_groups[item["category"]]
+            quotes = _select_quotes(reviews, n=3, used_hashes=used_quote_hashes)
+            available = len(quotes)
+            representative_quotes.append({
+                "category": item["category"],
+                "quotes": quotes,
+                "insufficient": available < 3,
+                "available_count": available,
+            })
+
+        # 12. Top themes
         top_themes = [item["category"] for item in roadmap_items[:3]]
 
-        # 11. Generate a descriptive table of the keywords used for categorization.
-        # Integrates with: The 'Methodology' panel in the UI to explain how themes were mapped.
+        # 13. Taxonomy keyword table
         keyword_table = [
             {"category": cat, "keywords": ", ".join(kws[:8])}
             for cat, kws in TAXONOMY.items()
             if cat != "Other"
         ]
 
-        # Final assembly of the analysis report dictionary.
-        # Integrates with: main.py response model and subsequent AIEngine and SynthesisEngine calls.
+        # 14. Legacy risks (kept for synthesis engine)
+        risks: list[str] = []
+        other_count = len(cat_groups.get("Other", []))
+        other_pct = round(other_count / max(1, total) * 100, 1)
+        if other_pct > 15:
+            risks.append(f"Other category is {other_pct}% of reviews — taxonomy may need expansion.")
+        low_conf = [item["category"] for item in roadmap_items if "Low" in item["confidence"]]
+        if low_conf:
+            risks.append(f"Low data confidence in: {', '.join(low_conf)}.")
+
+        noise_count = len(cat_groups.get("NOISE POOL", []))
+        other_total = other_count + noise_count
+        other_pct = round(other_total / max(1, total) * 100, 1)
+
         return {
             "meta": {
                 "total_reviews": total,
+                "pre_dedup_count": len(parsed),
+                "duplicates_removed": dup_removed,
                 "date_range": date_range,
                 "top_themes": top_themes,
                 "sentiment_distribution": {
-                    "Positive": round(pos_total / total * 100, 1),
-                    "Neutral": round(neu_total / total * 100, 1),
-                    "Negative": round(neg_total / total * 100, 1),
+                    "Positive": round(pos_total / max(1, total) * 100, 1),
+                    "Neutral": round(neu_total / max(1, total) * 100, 1),
+                    "Negative": round(neg_total / max(1, total) * 100, 1),
                 },
                 "has_date_col": bool(date_col),
                 "has_rating_col": bool(rating_col),
                 "rating_scale": rating_scale if rating_col else None,
                 "sentiment_source": "rating" if rating_col else "keyword",
-                "unclassified_count": len(unclassified),
-                "unclassified_samples": [r["text"][:100] for r in unclassified[:3]],
-                "low_review_warning": total < 10,
+                "unclassified_count": other_total,
+                "noise_pool_count": noise_count,
+                "unclassified_pct": other_pct,
+                "total_classified": total_classified,
+                "low_review_warning": total < 30,
             },
+            "preflight": preflight,
             "taxonomy_info": {
                 "keyword_table": keyword_table,
-                "priority_formula": "Priority Score = (Norm. Volume × 0.4) + (Avg Sentiment Impact × 0.35) + (Avg Recency Weight × 0.25)",
-                "sentiment_scale": "Rating < 3 (or <5 on 10pt) = Negative; = 3 = Neutral; > 3 = Positive" if rating_col else "Keyword-based: see SENTIMENT_KEYWORDS in settings",
+                "dispatch_weights": {
+                    "Pain Intensity": "0.30",
+                    "Impact Breadth": "0.25",
+                    "Urgency Velocity": "0.20 (or rebalanced if N/A)",
+                    "Strategic Leverage": "0.15",
+                    "Effort Inverse": "0.10",
+                },
             },
             "sentiment_distribution": {
                 "labels": ["Positive", "Neutral", "Negative"],
@@ -490,19 +909,38 @@ class Analyzer:
             },
             "sentiment_trend": sentiment_trend,
             "roadmap_items": roadmap_items,
-            "verbatim_quotes": top_3_verbatims,
+            "watch_list": watch_list,
+            "representative_quotes": representative_quotes,
             "risks": risks,
-            # Structured summary specifically pruned for the LLM prompt to minimize token usage.
-            # Integrates with: core/ai_engine.py narrative generation.
             "_for_ai": {
                 "total": total,
                 "top_themes": top_themes,
-                "sentiment_distribution": {"Positive": pos_total, "Neutral": neu_total, "Negative": neg_total},
+                "sentiment_distribution": {
+                    "Positive": pos_total,
+                    "Neutral": neu_total,
+                    "Negative": neg_total,
+                },
                 "roadmap_summary": [
-                    {"category": i["category"], "volume": i["volume"], "priority_score": i["priority_score"],
-                     "timeline": i["timeline"], "sentiment": i["sentiment_breakdown"]}
+                    {
+                        "category": i["category"],
+                        "volume": i["volume"],
+                        "priority_score": i.get("_legacy_priority", 0),
+                        "timeline": "TBD",
+                        "sentiment": i["sentiment_breakdown"],
+                    }
                     for i in roadmap_items[:5]
                 ],
                 "risks": risks,
-            }
+            },
+            "_parsed_reviews": [
+                {
+                    "text": r["text"],
+                    "rating": r["rating"],
+                    "sentiment": r["sentiment"],
+                    "category": r["category"],
+                    "date": r["date"],
+                    "recency_weight": r["recency_weight"],
+                }
+                for r in deduped
+            ],
         }

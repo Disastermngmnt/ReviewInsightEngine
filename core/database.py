@@ -6,7 +6,7 @@ import os
 
 # Default database location (SQLite file).
 # Integrates with: core/models.py for schema definition and core/auth.py for query execution.
-DATABASE_URL = "sqlite:///./app.db"
+DATABASE_URL = "sqlite:///./data/app.db"
 
 # Create the SQLAlchemy engine. 
 # check_same_thread=False is required for SQLite compatibility with multi-threaded FastAPI.

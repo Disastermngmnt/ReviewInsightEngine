@@ -42,7 +42,7 @@ class SecurityConfig(BaseModel):
 # Integrates with: core/database.py to initialize the SQLAlchemy engine.
 class DatabaseConfig(BaseModel):
     """Database configuration."""
-    url: str = Field(default="sqlite:///./app.db")
+    url: str = Field(default="sqlite:///./data/app.db")
     echo: bool = Field(default=False)
     pool_size: int = Field(default=5, ge=1)
     max_overflow: int = Field(default=10, ge=0)
@@ -61,7 +61,7 @@ class DatabaseConfig(BaseModel):
 class AIConfig(BaseModel):
     """AI/LLM configuration."""
     api_key: str = Field(default="")
-    model_name: str = Field(default="gemini-2.5-flash")
+    model_name: str = Field(default="gemini-1.5-flash")
     max_tokens: int = Field(default=8192, ge=100)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     timeout_seconds: int = Field(default=30, ge=5)
@@ -71,7 +71,7 @@ class AIConfig(BaseModel):
     @validator("api_key")
     def validate_api_key(cls, v):
         if not v:
-            raise ValueError("AI API key is required. Set GOOGLE_API_KEY in .env")
+            raise ValueError("AI API key is required. Set GOOGLE_GEMINI_API_KEY in .env")
         if len(v) < 20:
             raise ValueError("AI API key appears invalid (too short)")
         return v
@@ -138,12 +138,12 @@ def load_config() -> AppConfig:
             "session_timeout_minutes": int(os.getenv("SESSION_TIMEOUT_MINUTES", "30")),
         },
         "database": {
-            "url": os.getenv("DATABASE_URL", "sqlite:///./app.db"),
+            "url": os.getenv("DATABASE_URL", "sqlite:///./data/app.db"),
             "echo": os.getenv("DB_ECHO", "false").lower() == "true",
         },
         "ai": {
-            "api_key": os.getenv("GOOGLE_API_KEY", ""),
-            "model_name": os.getenv("AI_MODEL_NAME", "gemini-2.5-flash"),
+            "api_key": os.getenv("GOOGLE_API_KEY") or os.getenv("GOOGLE_GEMINI_API_KEY", ""),
+            "model_name": os.getenv("AI_MODEL_NAME", "gemini-1.5-flash"),
             "max_tokens": int(os.getenv("AI_MAX_TOKENS", "8192")),
             "temperature": float(os.getenv("AI_TEMPERATURE", "0.7")),
             "timeout_seconds": int(os.getenv("AI_TIMEOUT_SECONDS", "30")),

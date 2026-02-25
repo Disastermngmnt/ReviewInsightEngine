@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dispatch | Review Insight Engine</title>
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Spline+Sans+Mono:ital,wght@0,300..700;1,300..700&display=swap"
+        rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap"
+        rel="stylesheet">
+
+    <style>
+        :root {
+            /* Dispatch Theme Colors */
+            --bg: #111111;
+            --surface: #18181A;
+            --surface-light: #232326;
+            --border: #333333;
+            --text: #F2F2F2;
+            --text-muted: #888888;
+            --accent: #FF5A36;
+            --teal: #1F5244;
+            --gold: #A68D53;
+            --mono: 'Spline Sans Mono', monospace;
+            --serif: 'Instrument Serif', serif;
+            --sans: 'Inter', sans-serif;
+            --glow: rgba(255, 90, 54, 0.15);
+        }
+
+        body,
+        html {
+            margin: 0;
+            padding: 0;
+            background: var(--bg);
+            color: var(--text);
+            font-family: var(--sans);
+            overflow-x: hidden;
+            scroll-behavior: smooth;
+        }
+
+        ::selection {
+            background: var(--accent);
+            color: white;
+        }
+
+        /* Nav */
+        nav {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            padding: 24px 5%;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            z-index: 100;
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .logo {
+            font-family: var(--serif);
+            font-size: 32px;
+            font-weight: 400;
+            letter-spacing: -0.5px;
+            line-height: 1;
+        }
+
+        .logo em {
+            color: var(--accent);
+            font-style: italic;
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 32px;
+            align-items: center;
+        }
+
+        .nav-links a {
+            color: var(--text-muted);
+            text-decoration: none;
+            font-size: 14px;
+            font-weight: 500;
+            transition: color 0.2s;
+        }
+
+        .nav-links a:hover {
+            color: var(--text);
+        }
+
+        .btn-primary {
+            background: var(--text);
+            color: var(--bg);
+            padding: 12px 24px;
+            border-radius: 40px;
+            font-weight: 600;
+            font-size: 14px;
+            text-decoration: none;
+            transition: transform 0.2s, background 0.2s;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            background: var(--accent);
+            color: white;
+            box-shadow: 0 10px 20px rgba(255, 90, 54, 0.2);
+        }
+
+        .btn-outline {
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 12px 24px;
+            border-radius: 40px;
+            font-weight: 500;
+            font-size: 14px;
+            text-decoration: none;
+            transition: border-color 0.2s;
+        }
+
+        .btn-outline:hover {
+            border-color: var(--text);
+        }
+
+        /* Hero */
+        .hero {
+            padding: 180px 5% 100px;
+            text-align: center;
+            max-width: 900px;
+            margin: 0 auto;
+            position: relative;
+        }
+
+        .hero::before {
+            content: '';
+            position: absolute;
+            top: -100px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 800px;
+            height: 500px;
+            background: radial-gradient(circle, var(--glow) 0%, transparent 70%);
+            z-index: -1;
+            pointer-events: none;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 6px 16px;
+            border-radius: 40px;
+            border: 1px solid var(--border);
+            font-family: var(--mono);
+            font-size: 12px;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--accent);
+            margin-bottom: 32px;
+            background: rgba(255, 90, 54, 0.05);
+        }
+
+        .hero h1 {
+            font-family: var(--serif);
+            font-size: 82px;
+            font-weight: 400;
+            line-height: 1;
+            margin: 0 0 32px;
+            letter-spacing: -2px;
+        }
+
+        .hero h1 span {
+            color: var(--text-muted);
+            font-style: italic;
+        }
+
+        .hero p {
+            font-size: 20px;
+            color: var(--text-muted);
+            line-height: 1.6;
+            margin: 0 auto 48px;
+            max-width: 600px;
+        }
+
+        .hero-cta {
+            display: flex;
+            gap: 16px;
+            justify-content: center;
+            align-items: center;
+        }
+
+        /* Application Demo Image */
+        .app-preview {
+            max-width: 1200px;
+            margin: 0 auto 120px;
+            padding: 0 5%;
+        }
+
+        .app-window {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 30px 60px rgba(0, 0, 0, 0.5);
+            transform: perspective(1000px) rotateX(2deg);
+            transition: transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
+        }
+
+        .app-window:hover {
+            transform: perspective(1000px) rotateX(0deg);
+        }
+
+        .window-top {
+            height: 48px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            padding: 0 20px;
+            gap: 8px;
+            background: var(--surface-light);
+        }
+
+        .dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: var(--border);
+        }
+
+        .dot:nth-child(1) {
+            background: #FF5F56;
+        }
+
+        .dot:nth-child(2) {
+            background: #FFBD2E;
+        }
+
+        .dot:nth-child(3) {
+            background: #27C93F;
+        }
+
+        .window-body {
+            position: relative;
+            background: #F4F1ED;
+            /* Dispatch Newspaper Paper Color */
+            padding: 40px;
+        }
+
+        .mock-report {
+            max-width: 800px;
+            margin: 0 auto;
+            color: var(--bg);
+        }
+
+        .mock-title {
+            font-family: var(--serif);
+            font-size: 40px;
+            border-bottom: 2px solid var(--bg);
+            padding-bottom: 10px;
+            margin-bottom: 30px;
+        }
+
+        .mock-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        .mock-card {
+            border: 1px solid rgba(0, 0, 0, 0.2);
+            padding: 20px;
+            background: white;
+            box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.1);
+        }
+
+        .mock-card-title {
+            font-family: var(--serif);
+            font-size: 20px;
+            margin-bottom: 10px;
+        }
+
+        .mock-line {
+            height: 8px;
+            background: rgba(0, 0, 0, 0.1);
+            margin-bottom: 8px;
+            border-radius: 4px;
+        }
+
+        /* Features */
+        .features {
+            padding: 120px 5%;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .section-header {
+            text-align: center;
+            margin-bottom: 80px;
+        }
+
+        .section-header h2 {
+            font-family: var(--serif);
+            font-size: 56px;
+            margin: 0 0 16px;
+            letter-spacing: -1px;
+        }
+
+        .grid-3 {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 32px;
+        }
+
+        .feature-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            padding: 40px;
+            border-radius: 12px;
+            transition: background 0.3s;
+        }
+
+        .feature-card:hover {
+            background: var(--surface-light);
+        }
+
+        .f-icon {
+            font-size: 32px;
+            margin-bottom: 24px;
+            display: inline-block;
+            background: rgba(255, 255, 255, 0.05);
+            width: 64px;
+            height: 64px;
+            line-height: 64px;
+            text-align: center;
+            border-radius: 16px;
+            border: 1px solid var(--border);
+        }
+
+        .feature-card h3 {
+            font-family: var(--serif);
+            font-size: 28px;
+            margin: 0 0 16px;
+        }
+
+        .feature-card p {
+            color: var(--text-muted);
+            line-height: 1.6;
+            margin: 0;
+            font-size: 15px;
+        }
+
+        /* Social Proof / Numbers */
+        .metrics {
+            padding: 100px 5%;
+            background: var(--surface);
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .metrics-grid {
+            max-width: 1000px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+            text-align: center;
+        }
+
+        .metric-val {
+            font-family: var(--mono);
+            font-size: 48px;
+            color: var(--accent);
+            margin-bottom: 8px;
+        }
+
+        .metric-lbl {
+            font-size: 14px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            font-weight: 600;
+        }
+
+        /* Call to Action Footer */
+        .cta-footer {
+            padding: 160px 5%;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .cta-footer::after {
+            content: '';
+            position: absolute;
+            bottom: -200px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 800px;
+            height: 400px;
+            background: radial-gradient(circle, var(--glow) 0%, transparent 70%);
+            z-index: -1;
+            pointer-events: none;
+        }
+
+        .cta-footer h2 {
+            font-family: var(--serif);
+            font-size: 64px;
+            margin: 0 0 40px;
+        }
+
+        .footer-legal {
+            margin-top: 120px;
+            border-top: 1px solid var(--border);
+            padding-top: 40px;
+            display: flex;
+            justify-content: space-between;
+            color: var(--text-muted);
+            font-size: 13px;
+        }
+
+        .footer-legal a {
+            color: var(--text-muted);
+            text-decoration: none;
+        }
+
+        @media (max-width: 768px) {
+            .hero h1 {
+                font-size: 56px;
+            }
+
+            .grid-3 {
+                grid-template-columns: 1fr;
+            }
+
+            .metrics-grid {
+                grid-template-columns: 1fr 1fr;
+                gap: 40px;
+            }
+
+            .nav-links {
+                display: none;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <nav>
+        <div class="logo">Dis<em>patch</em></div>
+        <div class="nav-links">
+            <a href="#features">Features</a>
+            <a href="#demo">How it Works</a>
+            <a href="/?from_marketing=true" class="btn-primary">Go to App →</a>
+        </div>
+    </nav>
+
+    <header class="hero">
+        <div class="badge">V3.0 Now Live</div>
+        <h1>Your customers' words, <span>analyzed instantly.</span></h1>
+        <p>Stop manually tagging hundreds of app reviews, Zendesk tickets, or survey responses. Dispatch AI reads
+            completely unstructured feedback and generates a prioritized, data-backed product roadmap in seconds.</p>
+
+        <div class="hero-cta">
+            <a href="/?from_marketing=true" class="btn-primary" style="padding: 16px 32px; font-size: 16px;">Try
+                Dispatch Free</a>
+            <a href="#demo" class="btn-outline" style="padding: 16px 32px; font-size: 16px;">View Sample Report</a>
+        </div>
+    </header>
+
+    <section class="app-preview" id="demo">
+        <div class="app-window">
+            <div class="window-top">
+                <div class="dot"></div>
+                <div class="dot"></div>
+                <div class="dot"></div>
+                <div style="margin-left:auto; font-family:var(--mono); font-size:10px; color:var(--text-muted);">
+                    dispatch-report-rendered</div>
+            </div>
+            <div class="window-body">
+                <div class="mock-report">
+                    <div class="mock-title">Product Intelligence Report</div>
+                    <div style="display:flex; gap:10px; margin-bottom: 30px;">
+                        <span
+                            style="border:1px solid rgba(0,0,0,0.2); padding:4px 12px; font-family:var(--mono); font-size:10px; border-radius:20px;">500
+                            REVIEWS</span>
+                        <span
+                            style="border:1px solid rgba(0,0,0,0.2); padding:4px 12px; font-family:var(--mono); font-size:10px; border-radius:20px;">Q3
+                            2025</span>
+                    </div>
+
+                    <div class="mock-grid">
+                        <div class="mock-card">
+                            <div class="mock-card-title">Top Risk: UX/UI</div>
+                            <div class="mock-line" style="width: 100%;"></div>
+                            <div class="mock-line" style="width: 80%;"></div>
+                            <div class="mock-line" style="width: 90%;"></div>
+                            <div style="margin-top:20px; font-family:var(--mono); font-size:12px; color:#A32812;">12%
+                                churn signal detected</div>
+                        </div>
+                        <div class="mock-card">
+                            <div class="mock-card-title">Priority Roadmap</div>
+                            <div
+                                style="display:flex; justify-content:space-between; border-bottom:1px solid rgba(0,0,0,0.1); padding:8px 0; font-family:var(--sans); font-size:14px;">
+                                <span>1. Fix login loop</span>
+                                <strong>Score: 8.4</strong>
+                            </div>
+                            <div
+                                style="display:flex; justify-content:space-between; border-bottom:1px solid rgba(0,0,0,0.1); padding:8px 0; font-family:var(--sans); font-size:14px;">
+                                <span>2. Dark mode toggle</span>
+                                <strong>Score: 6.2</strong>
+                            </div>
+                            <div
+                                style="display:flex; justify-content:space-between; padding:8px 0; font-family:var(--sans); font-size:14px;">
+                                <span>3. Offline sync cache</span>
+                                <strong>Score: 5.1</strong>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="metrics">
+        <div class="metrics-grid">
+            <div>
+                <div class="metric-val">10x</div>
+                <div class="metric-lbl">Faster Analysis</div>
+            </div>
+            <div>
+                <div class="metric-val">100%</div>
+                <div class="metric-lbl">Data Coverage</div>
+            </div>
+            <div>
+                <div class="metric-val">5+</div>
+                <div class="metric-lbl">Data Sources</div>
+            </div>
+            <div>
+                <div class="metric-val">$0</div>
+                <div class="metric-lbl">Upfront Setup</div>
+            </div>
+        </div>
+    </section>
+
+    <section class="features" id="features">
+        <div class="section-header">
+            <h2>Built for Product Managers</h2>
+            <p style="color: var(--text-muted); font-size: 20px;">Stop making decisions on gut instinct. Use the data
+                you already own.</p>
+        </div>
+
+        <div class="grid-3">
+            <div class="feature-card">
+                <div class="f-icon">🧠</div>
+                <h3>Advanced NLP Taxonomy</h3>
+                <p>No predefined tags required. Our AI scans your reviews, determines the most relevant emerging topics,
+                    evaluates taxonomy exclusivity, and groups them dynamically using Gemini 2.5 Flash.</p>
+            </div>
+            <div class="feature-card">
+                <div class="f-icon">🔗</div>
+                <h3>Direct API Connectors</h3>
+                <p>Paste your Google Play Service Account JSON or public Apple App Store ID to fetch live reviews
+                    instantly. No more messy CSV exports or manual data cleaning required.</p>
+            </div>
+            <div class="feature-card">
+                <div class="f-icon">💰</div>
+                <h3>Financial Calibration</h3>
+                <p>Connect qualitative feedback to your bottom line. Input ARPU and Total Users, and Dispatch will
+                    calculate the absolute "Cost of Inaction" for every feature request.</p>
+            </div>
+            <div class="feature-card">
+                <div class="f-icon">🖨️</div>
+                <h3>Board-Ready Reports</h3>
+                <p>The output isn't a spreadsheet. It's a gorgeous newspaper-style intelligence brief ready to be
+                    downloaded as a Markdown file, PDF, or CSV for linear ticket tracking.</p>
+            </div>
+            <div class="feature-card">
+                <div class="f-icon">⚖️</div>
+                <h3>Deterministic Priority</h3>
+                <p>We grade features combining Volume, Severity, Churn Risk, and Development Effort. Stop letting the
+                    loudest customer dictate your sprint cycle.</p>
+            </div>
+            <div class="feature-card">
+                <div class="f-icon">🛡️</div>
+                <h3>Synthesis Validation</h3>
+                <p>AI hallucinations are real. Dispatch runs a deterministic plausibility check over the AI's output to
+                    grade the integrity of every single report, ensuring math and scores match quotes.</p>
+            </div>
+        </div>
+    </section>
+
+    <section class="cta-footer">
+        <h2>Ready to understand your users?</h2>
+        <a href="/?from_marketing=true" class="btn-primary"
+            style="padding: 20px 48px; font-size: 18px; display: inline-block;">Start Analyzing →</a>
+
+        <div class="footer-legal">
+            <div>© 2025 Review Insight Engine (Dispatch). Agentic Build.</div>
+            <div style="display: flex; gap: 24px;">
+                <a href="#">Privacy</a>
+                <a href="#">Terms</a>
+                <a href="#">Documentation</a>
+            </div>
+        </div>
+    </section>
+
+</body>
+
+</html>

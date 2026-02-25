@@ -195,8 +195,8 @@ def check_score_plausibility(report: dict, narratives: dict) -> dict:
 
     scores = [i["priority_score"] for i in items]
     
-    # Check 1: Scores must be normalized between 0.0 and 1.0.
-    all_valid = all(0.0 <= s <= 1.0 for s in scores)
+    # Check 1: Scores must be normalized between 0.0 and 10.0.
+    all_valid = all(0.0 <= s <= 10.0 for s in scores)
     # Check 2: Scores shouldn't all be identical (implies a degenerate ranking).
     not_all_same = len(set(scores)) > 1 or len(scores) == 1
     # Check 3: The roadmap must be sorted by score descending.
@@ -205,7 +205,7 @@ def check_score_plausibility(report: dict, narratives: dict) -> dict:
     passed = all_valid and not_all_same and sorted_desc
     issues = []
     if not all_valid:
-        issues.append(f"out-of-range scores: {[s for s in scores if not 0<=s<=1]}")
+        issues.append(f"out-of-range scores: {[s for s in scores if not 0<=s<=10.0]}")
     if not not_all_same:
         issues.append("all priority scores are identical")
     if not sorted_desc:

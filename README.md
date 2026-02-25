@@ -64,7 +64,7 @@ RATE_LIMIT_PER_MINUTE=60
 ### Initialize Database
 
 ```bash
-python init_db.py
+python scripts/init_db.py
 ```
 
 ### Run the Application
@@ -250,7 +250,7 @@ mypy core utils config --ignore-missing-imports
 
 ```bash
 # Validate all improvements
-python validate_improvements.py
+python scripts/validate_improvements.py
 ```
 
 ## Security
@@ -467,7 +467,7 @@ If you use ReviewInsightEngine in your research or product, please cite:
 **Made with ❤️ for product teams who want to understand their customers better.**
 
 For detailed documentation, see:
-- [Quick Start Guide](QUICKSTART.md)
-- [Security Guidelines](SECURITY.md)
-- [Deployment Checklist](DEPLOYMENT_CHECKLIST.md)
-- [Improvements Summary](IMPROVEMENTS_SUMMARY.md)
+- [Quick Start Guide](docs/QUICKSTART.md)
+- [Security Guidelines](docs/SECURITY.md)
+- [Deployment Checklist](docs/DEPLOYMENT_CHECKLIST.md)
+- [Improvements Summary](docs/IMPROVEMENTS_SUMMARY.md)

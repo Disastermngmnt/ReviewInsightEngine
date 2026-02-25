@@ -39,7 +39,7 @@ class TestSecurityConfig:
 class TestDatabaseConfig:
     def test_default_values(self):
         config = DatabaseConfig()
-        assert config.url == "sqlite:///./app.db"
+        assert config.url == "sqlite:///./data/app.db"
         assert config.pool_size == 5
     
     def test_empty_url_validation(self):
